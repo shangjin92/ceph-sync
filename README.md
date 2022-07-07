@@ -2,7 +2,7 @@
 A simple tool to sync ceph data from different cluster or different bucket.
 
 ```bash
-./ceph-cli sync --config sync.properties
+./ceph-sync cluster --config sync.properties
 ```
 
 Sample sync.properties
