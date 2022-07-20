@@ -1,12 +1,13 @@
 package core
 
 import (
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/s3"
+	"errors"
 	"github.com/magiconair/properties"
+	"github.com/shangjin92/ceph-sync/internal/store"
+	"github.com/sirupsen/logrus"
 	"github.com/wonderivan/logger"
+	"strings"
 	"sync"
-	"time"
 )
 
 const (
@@ -16,156 +17,160 @@ const (
 	TargetClusterAccessKey = "target_cluster_access_key"
 	TargetClusterSecretKey = "target_cluster_secret_key"
 	TargetClusterEndpoint  = "target_cluster_endpoint"
-	TargetClusterBucket    = "target_cluster_bucket"
 )
 
-func getTargetClusterBucket() string {
-	p := properties.MustLoadFile(SyncProperties, properties.UTF8)
-	return p.MustGetString(TargetClusterBucket)
+type SourceDataSourceConfig struct {
+	dataSourceType   string
+	clusterAccessKey string
+	clusterSecretKey string
+	clusterEndpoint  string
+	clusterBucket    string
 }
 
-func loadSourceClusterConfig() *CephConfig {
-	p := properties.MustLoadFile(SyncProperties, properties.UTF8)
-	accessKey := p.MustGetString(SourceClusterAccessKey)
-	secretKey := p.MustGetString(SourceClusterSecretKey)
-	endpoint := p.MustGetString(SourceClusterEndpoint)
-
-	return &CephConfig{accessKey: accessKey,
-		secretKey: secretKey,
-		endPoint:  endpoint}
+type TargetDataSourceConfig struct {
+	clusterAccessKey string
+	clusterSecretKey string
+	clusterEndpoint  string
+	clusterBucket    string
 }
 
-func loadTargetClusterConfig() *CephConfig {
+func loadSourceDataSourceConfig() *SourceDataSourceConfig {
 	p := properties.MustLoadFile(SyncProperties, properties.UTF8)
-	accessKey := p.MustGetString(TargetClusterAccessKey)
-	secretKey := p.MustGetString(TargetClusterSecretKey)
-	endpoint := p.MustGetString(TargetClusterEndpoint)
 
-	return &CephConfig{accessKey: accessKey,
-		secretKey: secretKey,
-		endPoint:  endpoint}
+	return &SourceDataSourceConfig{
+		dataSourceType:   SourceType,
+		clusterAccessKey: p.GetString(SourceClusterAccessKey, ""),
+		clusterSecretKey: p.GetString(SourceClusterSecretKey, ""),
+		clusterEndpoint:  p.GetString(SourceClusterEndpoint, ""),
+	}
 }
 
-func SyncClusterData() {
-	logger.Info("Begin sync data from source cluster...")
+func loadTargetDataSourceConfig() *TargetDataSourceConfig {
+	p := properties.MustLoadFile(SyncProperties, properties.UTF8)
 
-	sourceCephClusterConfig := loadSourceClusterConfig()
-	targetCephClusterConfig := loadTargetClusterConfig()
+	return &TargetDataSourceConfig{
+		clusterSecretKey: p.MustGetString(TargetClusterSecretKey),
+		clusterAccessKey: p.MustGetString(TargetClusterAccessKey),
+		clusterEndpoint:  p.MustGetString(TargetClusterEndpoint),
+	}
+}
 
-	var sourceCephClient = NewCephClient(sourceCephClusterConfig)
-	var targetCephClient = NewCephClient(targetCephClusterConfig)
+func newSourceStoreClient(config *SourceDataSourceConfig) (store.Store, error) {
+	switch strings.ToLower(config.dataSourceType) {
+	case "ceph":
+		cephConfig := &store.CephConfig{
+			AccessKey: config.clusterAccessKey,
+			SecretKey: config.clusterSecretKey,
+			EndPoint:  config.clusterEndpoint,
+		}
+		return store.NewCephClient(cephConfig)
+	case "oss":
+		ossConfig := &store.OssConfig{
+			AccessID:  config.clusterAccessKey,
+			AccessKey: config.clusterSecretKey,
+			EndPoint:  config.clusterEndpoint,
+		}
+		return store.NewOssClient(ossConfig)
+	case "local":
+		return store.NewLocalClient()
+	default:
+		return nil, errors.New("don't support this client")
+	}
+}
 
-	result, err := sourceCephClient.client.ListBuckets(nil)
+func newTargetStoreClient(config *TargetDataSourceConfig) (store.Store, error) {
+	cephConfig := &store.CephConfig{
+		AccessKey: config.clusterAccessKey,
+		SecretKey: config.clusterSecretKey,
+		EndPoint:  config.clusterEndpoint,
+	}
+
+	return store.NewCephClient(cephConfig)
+}
+
+func SyncClusterBucketData() {
+	logrus.Info("Begin sync data from source cluster bucket...")
+
+	sourceCephClusterConfig := loadSourceDataSourceConfig()
+	sourceStoreClient, err := newSourceStoreClient(sourceCephClusterConfig)
 	if err != nil {
-		logger.Error("list buckets failed, ", err)
+		logrus.Errorf("create source store client failed, error: %v", err)
 		return
 	}
-	for _, b := range result.Buckets {
-		logger.Info("----------------------------------------------------")
-		bucket := aws.StringValue(b.Name)
-		logger.Info("list bucket, * %s created on %s", bucket, aws.TimeValue(b.CreationDate))
 
-		err = createBucketIfAbsent(bucket, targetCephClient)
-		if err != nil {
-			logger.Error("create bucket failed, error: %v", err)
-			return
-		}
-		syncBucketData(bucket, sourceCephClient, targetCephClient)
-		logger.Info("----------------------------------------------------")
+	targetCephClusterConfig := loadTargetDataSourceConfig()
+	targetStoreClient, err := newTargetStoreClient(targetCephClusterConfig)
+	if err != nil {
+		logrus.Errorf("create target store client failed, error: %v", err)
+		return
 	}
-	logger.Info("Finished sync data from source cluster...")
+
+	syncBucketData(sourceStoreClient, targetStoreClient)
+
+	logrus.Info("Finished sync data from source cluster bucket...")
 }
 
-func createBucketIfAbsent(bucketName string, targetCephClient *CephClient) error {
-	checkResult := targetCephClient.CheckBucketExist(bucketName)
+func createBucketIfAbsent(bucketName string, targetClient store.Store) error {
+	checkResult, _ := targetClient.CheckBucketExist(bucketName)
 	if checkResult {
 		return nil
 	}
-	err := targetCephClient.CreateBucket(bucketName)
+	err := targetClient.CreateBucket(bucketName)
 	if err != nil {
+		logrus.Errorf("create bucket failed, error: %v", err)
 		return err
 	}
 	return nil
 }
 
-func SyncClusterBucketData() {
-	logger.Info("Begin sync data from source cluster bucket...")
+func syncBucketData(sourceClient, targetClient store.Store) {
+	err := createBucketIfAbsent(TargetClusterBucket, targetClient)
+	if err != nil {
+		logrus.Errorf("Create bucket failed, bucket name: %s", TargetClusterBucket)
+		return
+	}
 
-	sourceCephClusterConfig := loadSourceClusterConfig()
-	targetCephClusterConfig := loadTargetClusterConfig()
-
-	var sourceCephClient = NewCephClient(sourceCephClusterConfig)
-	var targetCephClient = NewCephClient(targetCephClusterConfig)
-
-	syncBucketData(getTargetClusterBucket(), sourceCephClient, targetCephClient)
-
-	logger.Info("Finished sync data from source cluster bucket...")
-}
-
-func syncBucketData(bucketName string, sourceCephClient, targetCephClient *CephClient) {
 	marker := ""
 	for {
-		logger.Info("sync bucket: %s, list 1000 objects...", bucketName)
-		listObjectsResponse, err := sourceCephClient.client.ListObjects(&s3.ListObjectsInput{
-			Bucket: aws.String(bucketName),
-			Marker: aws.String(marker),
-		})
-		if err != nil {
-			logger.Error("bucket: %s, list objects failed, error: %v", bucketName, err)
+		logrus.Infof("sync data to target cluster, bucket name: %s", TargetClusterBucket)
+
+		var sourceBucket = SourceClusterBucket
+		if SourceClusterBucket == "" && SourceLocalDirName != "" {
+			sourceBucket = SourceLocalDirName
+		}
+		listObjectResult, err2 := sourceClient.ListObjects(sourceBucket, marker, SourceClusterObjectPrefix)
+		if err2 != nil {
+			logrus.Errorf("list objects failed, source type: %s, source cluster bucket: %s", SourceType, SourceClusterBucket)
 			return
 		}
 
-		lastKey := ""
 		var wg sync.WaitGroup
-		for _, key := range listObjectsResponse.Contents {
-			//logger.Info("object Name: %s, object Last modified: %s, object size: %s, object storage class: %s",
-			//	*key.Key, *key.LastModified, *key.Size, *key.StorageClass)
-			lastKey = *key.Key
-
-			//beforeTime := time.Now().AddDate(0, 0, -3)
-			//if (*key.LastModified).Before(beforeTime) {
-			//	continue
-			//}
-
-			req, _ := sourceCephClient.client.GetObjectRequest(&s3.GetObjectInput{
-				Bucket: aws.String(bucketName),
-				Key:    aws.String(*key.Key),
-			})
-			urlStr, _ := req.Presign(15 * time.Minute)
-			//logger.Info("object name: %s, url: %s", *key.Key, urlStr)
-
+		for _, key := range listObjectResult.ObjectsName {
 			wg.Add(1)
+			objectUrl, urlType, err3 := sourceClient.GetObjectUrl(sourceBucket, key)
+			if err3 != nil {
+				logrus.Errorf("get object url failed, object name: %s, error: %v", key, err3)
+				return
+			}
+			var objectName = key
+			if TargetClusterObjectPrefix != "" {
+				objectName = TargetClusterObjectPrefix + objectName
+			}
 			go func(urlStr, dstObjectName string) {
 				defer wg.Done()
-				err = targetCephClient.UploadFile(urlStr, bucketName, dstObjectName)
+				err = targetClient.UploadFile(urlType, urlStr, TargetClusterBucket, dstObjectName)
 				if err != nil {
-					logger.Error("upload object failed, bucket: %s, name: %s, error: %v", bucketName, dstObjectName, err)
+					logger.Error("upload object failed, bucket: %s, name: %s, error: %v", TargetClusterBucket, dstObjectName, err)
 				}
-			}(urlStr, *key.Key)
+			}(objectUrl, objectName)
 		}
 		wg.Wait()
 
-		time.Sleep(3 * time.Second)
-		logger.Info("sync bucket: %s, 1000 objects have been uploaded...", bucketName)
-
-		if !*listObjectsResponse.IsTruncated {
-			logger.Info("suspend listing objects in bucket: %s", bucketName)
-			break
+		if *listObjectResult.Suspend {
+			logrus.Info("sync process has finished.")
+			return
 		} else {
-			prevMarker := marker
-			if listObjectsResponse.NextMarker == nil {
-				// From the s3 docs: If response does not include the
-				// NextMarker and it is truncated, you can use the value of the
-				// last Key in the response as the marker in the subsequent
-				// request to get the next set of object keys.
-				marker = lastKey
-			} else {
-				marker = *listObjectsResponse.NextMarker
-			}
-			if marker == prevMarker {
-				logger.Error("Unable to list all bucket objects.")
-				return
-			}
+			marker = *listObjectResult.NextMarker
 		}
 	}
 }
