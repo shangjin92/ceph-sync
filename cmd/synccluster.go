@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"github.com/shangjin92/ceph-sync/core"
 	"github.com/spf13/cobra"
 )
@@ -10,7 +11,7 @@ var syncCmd = &cobra.Command{
 	Short: "sync ceph cluster data",
 	Long:  `ceph-sync cluster --config /root/sync.properties`,
 	Run: func(cmd *cobra.Command, args []string) {
-		core.SyncClusterData()
+		fmt.Println("To be realized")
 	},
 }
 

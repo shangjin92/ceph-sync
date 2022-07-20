@@ -2,20 +2,21 @@ package cmd
 
 import (
 	"fmt"
-	"os"
-
-	homedir "github.com/mitchellh/go-homedir"
+	"github.com/shangjin92/ceph-sync/internal/utils/logger"
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
+	"os"
 )
 
-var cfgFile string
+var (
+	DebugAble bool
+)
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
 	Use:   "ceph-sync",
 	Short: "ceph sync tool",
-	Long:  "A simple tool to sync ceph data.",
+	Long:  "A simple tool to sync data to ceph.",
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
@@ -28,40 +29,22 @@ func Execute() {
 }
 
 func init() {
-	cobra.OnInitialize(initConfig)
+	cobra.OnInitialize(initialization)
 
-	// Here you will define your flags and configuration settings.
-	// Cobra supports persistent flags, which, if defined here,
-	// will be global for your application.
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file")
-
-	// Cobra also supports local flags, which will only run
-	// when this action is called directly.
-	rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+	rootCmd.PersistentFlags().BoolVar(&DebugAble, "debug", false, "logger ture for Debug, false for Info")
 }
 
-// initConfig reads in config file and ENV variables if set.
-func initConfig() {
-	if cfgFile != "" {
-		// Use config file from the flag.
-		viper.SetConfigFile(cfgFile)
-	} else {
-		// Find home directory.
-		home, err := homedir.Dir()
-		if err != nil {
-			fmt.Println(err)
-			os.Exit(1)
-		}
+func initialization() {
+	initLogger()
+}
 
-		// Search config in home directory with name ".config" (without extension).
-		viper.AddConfigPath(home)
-		viper.SetConfigName(".config")
-	}
+func initLogger() {
+	// basic setting
+	logrus.SetLevel(logrus.TraceLevel)
+	logrus.SetFormatter(&logger.LogFormatter{
+		WithColor: true,
+	})
 
-	viper.AutomaticEnv() // read in environment variables that match
-
-	// If a config file is found, read it in.
-	if err := viper.ReadInConfig(); err == nil {
-		fmt.Println("Using config file:", viper.ConfigFileUsed())
-	}
+	// set debugAble
+	logger.SetLogStdHook(DebugAble)
 }
